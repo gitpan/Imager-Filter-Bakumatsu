@@ -1,5 +1,5 @@
 #line 1
-# $Id: /local/ExtUtils-MakeMaker/lib/ExtUtils/MakeMaker.pm 54639 2008-02-29T00:06:55.056100Z schwern  $
+# $Id$
 package ExtUtils::MakeMaker;
 
 use strict;
@@ -14,13 +14,17 @@ use File::Path;
 our $Verbose = 0;       # exported
 our @Parent;            # needs to be localized
 our @Get_from_Config;   # referenced by MM_Unix
-my @MM_Sections;
-my @Overridable;
+our @MM_Sections;
+our @Overridable;
 my @Prepend_parent;
 my %Recognized_Att_Keys;
 
-our $VERSION = '6.44';
-our ($Revision) = q$Revision: 54639 $ =~ /Revision:\s+(\S+)/;
+our $VERSION = '6.56';
+
+# Emulate something resembling CVS $Revision$
+(our $Revision = $VERSION) =~ s{_}{};
+$Revision = int $Revision * 10000;
+
 our $Filename = __FILE__;   # referenced outside MakeMaker
 
 our @ISA = qw(Exporter);
@@ -40,7 +44,7 @@ require ExtUtils::MM;  # Things like CPAN assume loading ExtUtils::MakeMaker
 
 require ExtUtils::MY;  # XXX pre-5.8 versions of ExtUtils::Embed expect
                        # loading ExtUtils::MakeMaker will give them MY.
-                       # This will go when Embed is it's own CPAN module.
+                       # This will go when Embed is its own CPAN module.
 
 
 sub WriteMakefile {
@@ -78,11 +82,15 @@ my %Special_Sigs = (
  LIBS               => ['ARRAY',''],
  MAN1PODS           => 'HASH',
  MAN3PODS           => 'HASH',
+ META_ADD           => 'HASH',
+ META_MERGE         => 'HASH',
  PL_FILES           => 'HASH',
  PM                 => 'HASH',
  PMLIBDIRS          => 'ARRAY',
  PMLIBPARENTDIRS    => 'ARRAY',
  PREREQ_PM          => 'HASH',
+ BUILD_REQUIRES     => 'HASH',
+ CONFIGURE_REQUIRES => 'HASH',
  SKIP               => 'ARRAY',
  TYPEMAPS           => 'ARRAY',
  XS                 => 'HASH',
@@ -117,7 +125,7 @@ sub _verify_att {
 
         my @sigs   = ref $sig ? @$sig : $sig;
         my $given  = ref $val;
-        unless( grep { $given eq $_ || ($_ && eval{$val->isa($_)}) } @sigs ) {
+        unless( grep { _is_of_type($val, $_) } @sigs ) {
             my $takes = join " or ", map { _format_att($_) } @sigs;
 
             my $has = _format_att($given);
@@ -125,6 +133,19 @@ sub _verify_att {
                  "         Please inform the author.\n";
         }
     }
+}
+
+
+# Check if a given thing is a reference or instance of $type
+sub _is_of_type {
+    my($thing, $type) = @_;
+
+    return 1 if ref $thing eq $type;
+
+    local $SIG{__DIE__};
+    return 1 if eval{ $thing->isa($type) };
+
+    return 0;
 }
 
 
@@ -214,8 +235,9 @@ sub full_setup {
     my @attrib_help = qw/
 
     AUTHOR ABSTRACT ABSTRACT_FROM BINARY_LOCATION
-    C CAPI CCFLAGS CONFIG CONFIGURE DEFINE DIR DISTNAME DL_FUNCS DL_VARS
-    EXCLUDE_EXT EXE_FILES EXTRA_META FIRST_MAKEFILE
+    C CAPI CCFLAGS CONFIG CONFIGURE DEFINE DIR DISTNAME DISTVNAME
+    DL_FUNCS DL_VARS
+    EXCLUDE_EXT EXE_FILES FIRST_MAKEFILE
     FULLPERL FULLPERLRUN FULLPERLRUNINST
     FUNCLIST H IMPORTS
 
@@ -234,10 +256,11 @@ sub full_setup {
     SITELIBEXP      SITEARCHEXP 
 
     INC INCLUDE_EXT LDFROM LIB LIBPERL_A LIBS LICENSE
-    LINKTYPE MAKE MAKEAPERL MAKEFILE MAKEFILE_OLD MAN1PODS MAN3PODS MAP_TARGET 
+    LINKTYPE MAKE MAKEAPERL MAKEFILE MAKEFILE_OLD MAN1PODS MAN3PODS MAP_TARGET
+    META_ADD META_MERGE MIN_PERL_VERSION BUILD_REQUIRES CONFIGURE_REQUIRES
     MYEXTLIB NAME NEEDS_LINKING NOECHO NO_META NORECURS NO_VC OBJECT OPTIMIZE 
     PERL_MALLOC_OK PERL PERLMAINCC PERLRUN PERLRUNINST PERL_CORE
-    PERL_SRC PERM_RW PERM_RWX
+    PERL_SRC PERM_DIR PERM_RW PERM_RWX
     PL_FILES PM PM_FILTER PMLIBDIRS PMLIBPARENTDIRS POLLUTE PPM_INSTALL_EXEC
     PPM_INSTALL_SCRIPT PREREQ_FATAL PREREQ_PM PREREQ_PRINT PRINT_PREREQ
     SIGN SKIP TYPEMAPS VERSION VERSION_FROM XS XSOPT XSPROTOARG
@@ -287,7 +310,7 @@ sub full_setup {
     @Overridable = @MM_Sections;
     push @Overridable, qw[
 
- libscan makeaperl needs_linking perm_rw perm_rwx
+ libscan makeaperl needs_linking
  subdir_x test_via_harness test_via_script 
 
  init_VERSION init_dist init_INST init_INSTALL init_DEST init_dirscan
@@ -368,17 +391,22 @@ sub new {
         $self->{ARGS}{$k} = $self->{$k};
     }
 
+    $self = {} unless defined $self;
+
+    $self->{PREREQ_PM}      ||= {};
+    $self->{BUILD_REQUIRES} ||= {};
+
+    # Temporarily bless it into MM so it can be used as an
+    # object.  It will be blessed into a temp package later.
+    bless $self, "MM";
+
     if ("@ARGV" =~ /\bPREREQ_PRINT\b/) {
-        require Data::Dumper;
-        print Data::Dumper->Dump([$self->{PREREQ_PM}], [qw(PREREQ_PM)]);
-        exit 0;
+        $self->_PREREQ_PRINT;
     }
 
     # PRINT_PREREQ is RedHatism.
     if ("@ARGV" =~ /\bPRINT_PREREQ\b/) {
-        print join(" ", map { "perl($_)>=$self->{PREREQ_PM}->{$_} " } 
-                        sort keys %{$self->{PREREQ_PM}}), "\n";
-        exit 0;
+        $self->_PRINT_PREREQ;
    }
 
     print STDOUT "MakeMaker (v$VERSION)\n" if $Verbose;
@@ -386,42 +414,74 @@ sub new {
         check_manifest();
     }
 
-    $self = {} unless (defined $self);
-
     check_hints($self);
+
+    # Translate X.Y.Z to X.00Y00Z
+    if( defined $self->{MIN_PERL_VERSION} ) {
+        $self->{MIN_PERL_VERSION} =~ s{ ^ (\d+) \. (\d+) \. (\d+) $ }
+                                      {sprintf "%d.%03d%03d", $1, $2, $3}ex;
+    }
+
+    my $perl_version_ok = eval {
+        local $SIG{__WARN__} = sub { 
+            # simulate "use warnings FATAL => 'all'" for vintage perls
+            die @_;
+        };
+        !$self->{MIN_PERL_VERSION} or $self->{MIN_PERL_VERSION} <= $]
+    };
+    if (!$perl_version_ok) {
+        if (!defined $perl_version_ok) {
+            warn <<'END';
+Warning: MIN_PERL_VERSION is not in a recognized format.
+Recommended is a quoted numerical value like '5.005' or '5.008001'.
+END
+        }
+        elsif ($self->{PREREQ_FATAL}) {
+            die sprintf <<"END", $self->{MIN_PERL_VERSION}, $];
+MakeMaker FATAL: perl version too low for this distribution.
+Required is %s. We run %s.
+END
+        }
+        else {
+            warn sprintf
+                "Warning: Perl version %s or higher required. We run %s.\n",
+                $self->{MIN_PERL_VERSION}, $];
+        }
+    }
 
     my %configure_att;         # record &{$self->{CONFIGURE}} attributes
     my(%initial_att) = %$self; # record initial attributes
 
     my(%unsatisfied) = ();
-    foreach my $prereq (sort keys %{$self->{PREREQ_PM}}) {
-        # 5.8.0 has a bug with require Foo::Bar alone in an eval, so an
-        # extra statement is a workaround.
-        my $file = "$prereq.pm";
-        $file =~ s{::}{/}g;
-        eval { require $file };
+    my $prereqs = $self->_all_prereqs;
+    foreach my $prereq (sort keys %$prereqs) {
+        my $required_version = $prereqs->{$prereq};
 
-        my $pr_version = $prereq->VERSION || 0;
+        my $installed_file = MM->_installed_file_for_module($prereq);
+        my $pr_version = 0;
+        $pr_version = MM->parse_version($installed_file) if $installed_file;
+        $pr_version = 0 if $pr_version eq 'undef';
 
         # convert X.Y_Z alpha version #s to X.YZ for easier comparisons
         $pr_version =~ s/(\d+)\.(\d+)_(\d+)/$1.$2$3/;
 
-        if ($@) {
+        if (!$installed_file) {
             warn sprintf "Warning: prerequisite %s %s not found.\n", 
-              $prereq, $self->{PREREQ_PM}{$prereq} 
+              $prereq, $required_version
                    unless $self->{PREREQ_FATAL};
+
             $unsatisfied{$prereq} = 'not installed';
-        } elsif ($pr_version < $self->{PREREQ_PM}->{$prereq} ){
+        }
+        elsif ($pr_version < $required_version ){
             warn sprintf "Warning: prerequisite %s %s not found. We have %s.\n",
-              $prereq, $self->{PREREQ_PM}{$prereq}, 
-                ($pr_version || 'unknown version') 
+              $prereq, $required_version, ($pr_version || 'unknown version') 
                   unless $self->{PREREQ_FATAL};
-            $unsatisfied{$prereq} = $self->{PREREQ_PM}->{$prereq} ? 
-              $self->{PREREQ_PM}->{$prereq} : 'unknown version' ;
+
+            $unsatisfied{$prereq} = $required_version ? $required_version : 'unknown version' ;
         }
     }
-    
-     if (%unsatisfied && $self->{PREREQ_FATAL}){
+
+    if (%unsatisfied && $self->{PREREQ_FATAL}){
         my $failedprereqs = join "\n", map {"    $_ $unsatisfied{$_}"} 
                             sort { $a cmp $b } keys %unsatisfied;
         die <<"END";
@@ -523,30 +583,10 @@ END
     $self->init_linker;
     $self->init_ABSTRACT;
 
-    if (! $self->{PERL_SRC} ) {
-        require VMS::Filespec if $Is_VMS;
-        my($pthinks) = $self->canonpath($INC{'Config.pm'});
-        my($cthinks) = $self->catfile($Config{'archlibexp'},'Config.pm');
-        $pthinks = VMS::Filespec::vmsify($pthinks) if $Is_VMS;
-        if ($pthinks ne $cthinks &&
-            !($Is_Win32 and lc($pthinks) eq lc($cthinks))) {
-            print "Have $pthinks expected $cthinks\n";
-            if ($Is_Win32) {
-                $pthinks =~ s![/\\]Config\.pm$!!i; $pthinks =~ s!.*[/\\]!!;
-            }
-            else {
-                $pthinks =~ s!/Config\.pm$!!; $pthinks =~ s!.*/!!;
-            }
-            print STDOUT <<END unless $self->{UNINSTALLED_PERL};
-Your perl and your Config.pm seem to have different ideas about the 
-architecture they are running on.
-Perl thinks: [$pthinks]
-Config says: [$Config{archname}]
-This may or may not cause problems. Please check your installation of perl 
-if you have problems building this extension.
-END
-        }
-    }
+    $self->arch_check(
+        $INC{'Config.pm'},
+        $self->catfile($Config{'archlibexp'}, "Config.pm")
+    );
 
     $self->init_others();
     $self->init_platform();
@@ -566,18 +606,9 @@ END
 #
 #   MakeMaker ARGV: $argv
 #
-#   MakeMaker Parameters:
 END
 
-    foreach my $key (sort keys %initial_att){
-        next if $key eq 'ARGS';
-
-        my($v) = neatvalue($initial_att{$key});
-        $v =~ s/(CODE|HASH|ARRAY|SCALAR)\([\dxa-f]+\)/$1\(...\)/;
-        $v =~ tr/\n/ /s;
-        push @{$self->{RESULT}}, "#     $key => $v";
-    }
-    undef %initial_att;        # free memory
+    push @{$self->{RESULT}}, $self->_MakeMaker_Parameters_section(\%initial_att);
 
     if (defined $self->{CONFIGURE}) {
        push @{$self->{RESULT}}, <<END;
@@ -671,6 +702,58 @@ test :
 EOP
     close $mfh or die "close $new for write: $!";
 }
+
+
+#line 719
+
+sub _installed_file_for_module {
+    my $class  = shift;
+    my $prereq = shift;
+
+    my $file = "$prereq.pm";
+    $file =~ s{::}{/}g;
+
+    my $path;
+    for my $dir (@INC) {
+        my $tmp = File::Spec->catfile($dir, $file);
+        if ( -r $tmp ) {
+            $path = $tmp;
+            last;
+        }
+    }
+
+    return $path;
+}
+
+
+# Extracted from MakeMaker->new so we can test it
+sub _MakeMaker_Parameters_section {
+    my $self = shift;
+    my $att  = shift;
+
+    my @result = <<'END';
+#   MakeMaker Parameters:
+END
+
+    foreach my $key (sort keys %$att){
+        next if $key eq 'ARGS';
+        my ($v) = neatvalue($att->{$key});
+        if ($key eq 'PREREQ_PM') {
+            # CPAN.pm takes prereqs from this field in 'Makefile'
+            # and does not know about BUILD_REQUIRES
+            $v = neatvalue({ %{ $att->{PREREQ_PM} || {} }, %{ $att->{BUILD_REQUIRES} || {} } });
+        } else {
+            $v = neatvalue($att->{$key});
+        }
+
+        $v =~ s/(CODE|HASH|ARRAY|SCALAR)\([\dxa-f]+\)/$1\(...\)/;
+        $v =~ tr/\n/ /s;
+        push @result, "#     $key => $v";
+    }
+
+    return @result;
+}
+
 
 sub check_manifest {
     print STDOUT "Checking if your kit is complete...\n";
@@ -1003,4 +1086,4 @@ sub selfdocument {
 
 __END__
 
-#line 2637
+#line 2807
